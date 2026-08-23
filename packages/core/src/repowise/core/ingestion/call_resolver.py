@@ -150,7 +150,14 @@ _LANGUAGE_CALL_STRATEGIES: dict[str, _LanguageCallStrategies] = {
     # the typed-receiver fallback too. One `name: Type` shape reaches its
     # typed vals, vars and parameters alike, so the language gate no longer
     # declines the moment the fallback asks.
-    "java": replace(_JVM_STRATEGIES, member_fallback=_TYPED_RECEIVER),
+    # Java takes the uniqueness-gated form of the package tier and Kotlin the
+    # open one; see ``_resolve_java_same_package_unique`` for why that is a
+    # language rule and not a tuning knob.
+    "java": replace(
+        _JVM_STRATEGIES,
+        free=("_resolve_java_same_package_unique",),
+        member_fallback=_TYPED_RECEIVER,
+    ),
     "kotlin": replace(_JVM_STRATEGIES, member_fallback=_TYPED_RECEIVER),
     "csharp": _LanguageCallStrategies(member_fallback=_TYPED_RECEIVER),
     "python": _LanguageCallStrategies(member_fallback=_TYPED_RECEIVER),
@@ -578,16 +585,60 @@ class CallResolver:
         identifier ``Helper`` may be a class or method defined in any sibling
         file of the same package, with no import statement.
         """
+        return self._jvm_same_package(file_path, call, caller_id, unique_only=False)
+
+    def _resolve_java_same_package_unique(
+        self,
+        file_path: str,
+        call: CallSite,
+        caller_id: str,
+    ) -> ResolvedCall | None:
+        """Same tier as ``_resolve_jvm_same_package``, refusing on ambiguity.
+
+        Java-only, and the split is a language rule rather than a tuning knob.
+        Kotlin puts top-level functions and extension functions in package
+        scope, so a bare name genuinely *is* a package lookup there and this
+        tier is answering the question the language asks. Java has no top-level
+        functions: a bare name is a static import, an inherited member, or a
+        member call whose receiver the grammar dropped, and none of those is a
+        package lookup. Hand-reading what the gate removes says the same:
+        20 of 20 removed on caffeine were wrong edges, against 16 of 20 removed
+        on exposed and ktor being right ones.
+
+        The refusal is not a deletion. The free-call chain continues into the
+        import tiers, and on caffeine they answer 14,307 of the 18,390 refused
+        sites from the caller's own import list, evidence this tier never had.
+        """
+        return self._jvm_same_package(file_path, call, caller_id, unique_only=True)
+
+    def _jvm_same_package(
+        self,
+        file_path: str,
+        call: CallSite,
+        caller_id: str,
+        *,
+        unique_only: bool,
+    ) -> ResolvedCall | None:
         index = self._get_jvm_index()
         if index is None:
             return None
-        siblings = index.same_package_files(file_path)
-        for sibling in siblings:
-            syms = self._file_symbols.get(sibling, {})
-            sym_id = syms.get(call.target_name)
+        found: str | None = None
+        for sibling in index.same_package_files(file_path):
+            sym_id = self._file_symbols.get(sibling, {}).get(call.target_name)
             if sym_id is not None and sym_id != caller_id:
-                return ResolvedCall(caller_id, sym_id, 0.90, call.line, "same_package")
-        return None
+                if not unique_only:
+                    return ResolvedCall(caller_id, sym_id, 0.90, call.line, "same_package")
+                if found is not None:
+                    # Two siblings declare it and nothing here can tell them
+                    # apart; the loop used to answer with whichever file the
+                    # index walked first. Uniqueness is what keeps the
+                    # ``global_unique`` tier further down this same chain
+                    # honest, and this tier had no equivalent.
+                    return None
+                found = sym_id
+        if found is None:
+            return None
+        return ResolvedCall(caller_id, found, 0.90, call.line, "same_package")
 
     def _resolve_jvm_receiver_same_package(
         self,

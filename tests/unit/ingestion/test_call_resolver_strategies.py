@@ -207,6 +207,7 @@ _LANGUAGE_STRATEGIES = (
     "_resolve_go_same_package",
     "_resolve_go_package_call",
     "_resolve_jvm_same_package",
+    "_resolve_java_same_package_unique",
     "_resolve_jvm_receiver_same_package",
     "_resolve_cpp_same_target",
 )
@@ -250,7 +251,9 @@ class TestLanguageDispatch:
                 "Main.java",
                 "java",
                 "class Main {\n    void run() {\n        elsewhere();\n    }\n}\n",
-                ["_resolve_jvm_same_package"],
+                # java takes the uniqueness-gated form of the package tier,
+                # kotlin the open one.
+                ["_resolve_java_same_package_unique"],
             ),
             (
                 "main.cc",
